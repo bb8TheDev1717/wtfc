@@ -20,6 +20,8 @@ const (
 	modeCoprBrowse
 	modeDNFSearch
 	modeDNFBrowse
+	modeRemoveSearch
+	modeRemoveBrowse
 )
 
 type searchDoneMsg struct {
@@ -48,20 +50,26 @@ type fuzzyTriggerMsg struct {
 	gen   int
 }
 
+type removeDoneMsg struct {
+	results []api.InstalledPackage
+	err     error
+}
+
 type Model struct {
-	input      textinput.Model
-	results    []api.Project
-	dnfResults []api.DNFPackage
-	selected   map[string]bool
-	cursor     int
-	menuCursor int
-	loading    bool
-	err        error
-	width      int
-	height     int
-	lastQuery  string
-	mode       mode
-	searchGen  int
+	input          textinput.Model
+	results        []api.Project
+	dnfResults     []api.DNFPackage
+	removeResults  []api.InstalledPackage
+	selected       map[string]bool
+	cursor         int
+	menuCursor     int
+	loading        bool
+	err            error
+	width          int
+	height         int
+	lastQuery      string
+	mode           mode
+	searchGen      int
 }
 
 var (
@@ -107,9 +115,10 @@ var (
 var menuItems = []string{
 	"  Search COPR repositories",
 	"  Search DNF packages",
+	"  Remove installed packages",
 }
 
-var menuIcons = []string{"󰏗", "󰏖"}
+var menuIcons = []string{"󰏗", "󰏖", "󰆴"}
 
 func New() Model {
 	ti := textinput.New()
@@ -152,6 +161,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 1:
 					m.mode = modeDNFSearch
 					m.input.Placeholder = "e.g. firefox, git, htop..."
+					m.input.Focus()
+					return m, textinput.Blink
+				case 2:
+					m.mode = modeRemoveSearch
+					m.input.Placeholder = "search installed packages..."
 					m.input.Focus()
 					return m, textinput.Blink
 				}
@@ -265,6 +279,84 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case modeRemoveSearch:
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				if len(m.removeResults) > 0 {
+					m.mode = modeRemoveBrowse
+					m.input.Blur()
+					return m, nil
+				}
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				return m, nil
+			case "enter":
+				q := strings.TrimSpace(m.input.Value())
+				m.loading = true
+				m.lastQuery = q
+				m.cursor = 0
+				m.removeResults = nil
+				m.err = nil
+				m.mode = modeRemoveBrowse
+				m.input.Blur()
+				return m, doRemoveSearch(q)
+			}
+
+		case modeRemoveBrowse:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.removeResults = nil
+				m.lastQuery = ""
+				m.selected = make(map[string]bool)
+				return m, nil
+			case "/":
+				m.mode = modeRemoveSearch
+				m.input.Focus()
+				return m, textinput.Blink
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down":
+				if m.cursor < len(m.removeResults)-1 {
+					m.cursor++
+				}
+			case " ":
+				if len(m.removeResults) > 0 {
+					key := m.removeResults[m.cursor].Name
+					m.selected[key] = !m.selected[key]
+				}
+			case "i":
+				if len(m.removeResults) > 0 {
+					var pkgs []string
+					if len(m.selected) > 0 {
+						for _, p := range m.removeResults {
+							if m.selected[p.Name] {
+								pkgs = append(pkgs, p.Name)
+							}
+						}
+					} else {
+						pkgs = []string{m.removeResults[m.cursor].Name}
+					}
+					return m, tea.ExecProcess(
+						exec.Command("bash", "-c",
+							fmt.Sprintf("sudo dnf remove %s -y; echo; read -p 'Press Enter to return...'", strings.Join(pkgs, " ")),
+						), func(err error) tea.Msg {
+							return removeDoneMsg{results: m.removeResults}
+						},
+					)
+				}
+			}
+			return m, nil
+
 		case modeCoprBrowse:
 			switch msg.String() {
 			case "ctrl+c", "q":
@@ -311,6 +403,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case removeDoneMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			m.removeResults = msg.results
+		}
+		return m, nil
 
 	case fuzzyTriggerMsg:
 		return m.handleFuzzyTrigger(msg)
@@ -369,7 +470,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.input, inputCmd = m.input.Update(msg)
 	newVal := m.input.Value()
 
-	if newVal != prevVal && newVal != "" && (m.mode == modeCoprSearch || m.mode == modeDNFSearch) {
+	if newVal != prevVal && newVal != "" && (m.mode == modeCoprSearch || m.mode == modeDNFSearch || m.mode == modeRemoveSearch) {
 		m.searchGen++
 		gen := m.searchGen
 		debounce := tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg {
@@ -391,16 +492,23 @@ func (m *Model) handleFuzzyTrigger(msg fuzzyTriggerMsg) (tea.Model, tea.Cmd) {
 	m.loading = true
 	m.lastQuery = q
 	m.cursor = 0
-	if m.mode == modeCoprSearch {
+	switch m.mode {
+	case modeCoprSearch:
 		m.results = nil
 		m.mode = modeCoprBrowse
 		m.input.Blur()
 		return m, doCoprSearch(q)
+	case modeRemoveSearch:
+		m.removeResults = nil
+		m.mode = modeRemoveBrowse
+		m.input.Blur()
+		return m, doRemoveSearch(q)
+	default:
+		m.dnfResults = nil
+		m.mode = modeDNFBrowse
+		m.input.Blur()
+		return m, doDNFSearch(q)
 	}
-	m.dnfResults = nil
-	m.mode = modeDNFBrowse
-	m.input.Blur()
-	return m, doDNFSearch(q)
 }
 
 func fetchAndInstallMulti(results []api.Project, selected map[string]bool) tea.Cmd {
@@ -427,6 +535,13 @@ func fetchAndInstall(p api.Project) tea.Cmd {
 			pkgs = []string{p.Name}
 		}
 		return installMsg{project: p, packages: pkgs, err: err}
+	}
+}
+
+func doRemoveSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		results, err := api.GetInstalled(query)
+		return removeDoneMsg{results: results, err: err}
 	}
 }
 
@@ -457,9 +572,9 @@ func (m Model) View() string {
 	switch m.mode {
 	case modeMenu:
 		return m.viewMenu(w, h)
-	case modeCoprSearch, modeDNFSearch:
+	case modeCoprSearch, modeDNFSearch, modeRemoveSearch:
 		return m.viewSearch(w, h)
-	case modeCoprBrowse, modeDNFBrowse:
+	case modeCoprBrowse, modeDNFBrowse, modeRemoveBrowse:
 		return m.viewBrowse(w, h)
 	}
 	return ""
@@ -503,6 +618,8 @@ func (m Model) viewSearch(w, h int) string {
 	name, title := "wtfd", "DNF Search"
 	if isCopr {
 		name, title = "wtfc", "COPR Search"
+	} else if m.mode == modeRemoveSearch {
+		name, title = "wtfd", "Remove"
 	}
 
 	header := lipgloss.JoinVertical(lipgloss.Left,
@@ -519,9 +636,12 @@ func (m Model) viewSearch(w, h int) string {
 
 func (m Model) viewBrowse(w, h int) string {
 	isCopr := m.mode == modeCoprBrowse
+	isRemove := m.mode == modeRemoveBrowse
 	name, title := "wtfd", "DNF Results"
 	if isCopr {
 		name, title = "wtfc", "COPR Results"
+	} else if isRemove {
+		name, title = "wtfd", "Remove"
 	}
 
 	panelW := w - 4
@@ -533,6 +653,8 @@ func (m Model) viewBrowse(w, h int) string {
 	hints := "↑↓ navigate  ·  space select  ·  i install  ·  / search  ·  esc menu  ·  q quit"
 	if isCopr {
 		hints = "↑↓ navigate  ·  space select  ·  i install  ·  y copy  ·  / search  ·  esc menu"
+	} else if isRemove {
+		hints = "↑↓ navigate  ·  space select  ·  i remove  ·  / search  ·  esc menu  ·  q quit"
 	}
 	header.WriteString(styleHint.Render(hints))
 
@@ -546,12 +668,14 @@ func (m Model) viewBrowse(w, h int) string {
 		body.WriteString("\n  " + styleRed.Render("error: "+m.err.Error()) + "\n")
 	} else if isCopr {
 		m.renderCoprResults(&body, panelW)
+	} else if isRemove {
+		m.renderRemoveResults(&body, panelW)
 	} else {
 		m.renderDNFResults(&body, panelW)
 	}
 
 	// Footer
-	footer := m.renderFooter(isCopr, panelW)
+	footer := m.renderFooter(isCopr, isRemove, panelW)
 
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		headerPanel,
@@ -622,25 +746,64 @@ func (m Model) renderDNFResults(sb *strings.Builder, panelW int) {
 	}
 }
 
-func (m Model) renderFooter(isCopr bool, panelW int) string {
+func (m Model) renderRemoveResults(sb *strings.Builder, panelW int) {
+	if len(m.removeResults) == 0 && m.lastQuery != "" {
+		sb.WriteString("\n  " + styleDim.Render("no results") + "\n")
+		return
+	}
+	maxSummary := panelW - 50
+	if maxSummary < 20 {
+		maxSummary = 20
+	}
+	for i, p := range m.removeResults {
+		summary := p.Summary
+		if len(summary) > maxSummary {
+			summary = summary[:maxSummary-3] + "..."
+		}
+		check := "  "
+		if m.selected[p.Name] {
+			check = styleRed.Render("✓ ")
+		}
+		line := fmt.Sprintf("%-28s  %-14s  %s", p.Name, styleDim.Render(p.Version), summary)
+		if i == m.cursor {
+			sb.WriteString(styleSelected.Width(panelW).Render(" › "+check+line) + "\n")
+		} else {
+			sb.WriteString("   " + check + line + "\n")
+		}
+	}
+}
+
+func (m Model) renderFooter(isCopr, isRemove bool, panelW int) string {
 	if len(m.selected) > 0 {
 		var selNames []string
+		action := "install"
+		col := styleGreen
+		if isRemove {
+			action = "remove"
+			col = styleRed
+		}
 		if isCopr {
 			for _, p := range m.results {
 				if m.selected[p.FullName] {
-					selNames = append(selNames, styleGreen.Render(p.FullName))
+					selNames = append(selNames, col.Render(p.FullName))
+				}
+			}
+		} else if isRemove {
+			for _, p := range m.removeResults {
+				if m.selected[p.Name] {
+					selNames = append(selNames, col.Render(p.Name))
 				}
 			}
 		} else {
 			for _, p := range m.dnfResults {
 				if m.selected[p.Name] {
-					selNames = append(selNames, styleGreen.Render(p.Name))
+					selNames = append(selNames, col.Render(p.Name))
 				}
 			}
 		}
 		return styleFooter.Width(panelW).Render(
-			styleDim.Render("selected: ") + strings.Join(selNames, styleDim.Render(", ")) + "\n" +
-				styleHint.Render("press i to install all"),
+			styleDim.Render("selected: ")+strings.Join(selNames, styleDim.Render(", "))+"\n"+
+				styleHint.Render("press i to "+action+" all"),
 		)
 	}
 
@@ -651,7 +814,12 @@ func (m Model) renderFooter(isCopr bool, panelW int) string {
 				styleDim.Render("sudo dnf install "+sel.Name),
 		)
 	}
-	if !isCopr && len(m.dnfResults) > 0 {
+	if isRemove && len(m.removeResults) > 0 {
+		return styleFooter.Width(panelW).Render(
+			styleRed.Render("sudo dnf remove " + m.removeResults[m.cursor].Name),
+		)
+	}
+	if !isCopr && !isRemove && len(m.dnfResults) > 0 {
 		return styleFooter.Width(panelW).Render(
 			styleGreen.Render("sudo dnf install " + m.dnfResults[m.cursor].Name),
 		)
