@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -42,6 +43,11 @@ type installMultiMsg struct {
 	err      error
 }
 
+type fuzzyTriggerMsg struct {
+	query string
+	gen   int
+}
+
 type Model struct {
 	input      textinput.Model
 	results    []api.Project
@@ -55,6 +61,7 @@ type Model struct {
 	height     int
 	lastQuery  string
 	mode       mode
+	searchGen  int
 }
 
 var (
@@ -305,6 +312,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+	case fuzzyTriggerMsg:
+		return m.handleFuzzyTrigger(msg)
+
 	case dnfSearchDoneMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -354,9 +364,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	}
 
-	var cmd tea.Cmd
-	m.input, cmd = m.input.Update(msg)
-	return m, cmd
+	prevVal := m.input.Value()
+	var inputCmd tea.Cmd
+	m.input, inputCmd = m.input.Update(msg)
+	newVal := m.input.Value()
+
+	if newVal != prevVal && newVal != "" && (m.mode == modeCoprSearch || m.mode == modeDNFSearch) {
+		m.searchGen++
+		gen := m.searchGen
+		debounce := tea.Tick(400*time.Millisecond, func(t time.Time) tea.Msg {
+			return fuzzyTriggerMsg{query: newVal, gen: gen}
+		})
+		return m, tea.Batch(inputCmd, debounce)
+	}
+	return m, inputCmd
+}
+
+func (m *Model) handleFuzzyTrigger(msg fuzzyTriggerMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.searchGen {
+		return m, nil
+	}
+	q := strings.TrimSpace(msg.query)
+	if q == "" {
+		return m, nil
+	}
+	m.loading = true
+	m.lastQuery = q
+	m.cursor = 0
+	if m.mode == modeCoprSearch {
+		m.results = nil
+		m.mode = modeCoprBrowse
+		m.input.Blur()
+		return m, doCoprSearch(q)
+	}
+	m.dnfResults = nil
+	m.mode = modeDNFBrowse
+	m.input.Blur()
+	return m, doDNFSearch(q)
 }
 
 func fetchAndInstallMulti(results []api.Project, selected map[string]bool) tea.Cmd {
