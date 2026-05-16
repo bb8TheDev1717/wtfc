@@ -30,9 +30,15 @@ type installMsg struct {
 	err      error
 }
 
+type installMultiMsg struct {
+	commands []string
+	err      error
+}
+
 type Model struct {
 	input      textinput.Model
 	results    []api.Project
+	selected   map[string]bool
 	cursor     int
 	menuCursor int
 	loading    bool
@@ -61,7 +67,7 @@ func New() Model {
 	ti := textinput.New()
 	ti.Placeholder = "e.g. neovim, hyprland, quickshell..."
 	ti.CharLimit = 100
-	return Model{input: ti, mode: modeMenu}
+	return Model{input: ti, mode: modeMenu, selected: make(map[string]bool)}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -151,12 +157,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < len(m.results)-1 {
 					m.cursor++
 				}
+			case " ":
+				if len(m.results) > 0 {
+					key := m.results[m.cursor].FullName
+					m.selected[key] = !m.selected[key]
+				}
 			case "y":
 				if len(m.results) > 0 {
 					exec.Command("wl-copy", m.results[m.cursor].EnableCmd()).Run()
 				}
 			case "i":
 				if len(m.results) > 0 {
+					if len(m.selected) > 0 {
+						m.loading = true
+						return m, fetchAndInstallMulti(m.results, m.selected)
+					}
 					p := m.results[m.cursor]
 					m.loading = true
 					return m, fetchAndInstall(p)
@@ -173,6 +188,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.results = msg.results
 		}
 		return m, nil
+
+	case installMultiMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		script := strings.Join(msg.commands, " && ") + "; echo; read -p 'Press Enter to return...'"
+		return m, tea.ExecProcess(
+			exec.Command("bash", "-c", script),
+			func(err error) tea.Msg {
+				return searchDoneMsg{results: m.results}
+			},
+		)
 
 	case installMsg:
 		m.loading = false
@@ -194,6 +223,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func fetchAndInstallMulti(results []api.Project, selected map[string]bool) tea.Cmd {
+	return func() tea.Msg {
+		var cmds []string
+		for _, p := range results {
+			if !selected[p.FullName] {
+				continue
+			}
+			pkgs, err := api.GetPackages(p.OwnerName, p.Name)
+			if err != nil || len(pkgs) == 0 {
+				pkgs = []string{p.Name}
+			}
+			cmds = append(cmds, fmt.Sprintf("sudo dnf copr enable %s -y && sudo dnf install %s -y", p.FullName, strings.Join(pkgs, " ")))
+		}
+		return installMultiMsg{commands: cmds}
+	}
 }
 
 func fetchAndInstall(p api.Project) tea.Cmd {
@@ -233,7 +279,7 @@ func (m Model) View() string {
 		sb.WriteString(m.input.View() + "\n")
 
 	case modeCoprBrowse:
-		sb.WriteString(styleDim.Render("↑↓ = navigate  i = install  y = copy  / = search  esc = menu  q = quit") + "\n\n")
+		sb.WriteString(styleDim.Render("↑↓ = navigate  space = select  i = install  y = copy  / = search  esc = menu  q = quit") + "\n\n")
 		sb.WriteString(m.input.View() + "\n\n")
 
 		if m.loading {
@@ -262,15 +308,31 @@ func (m Model) View() string {
 			desc = strings.ReplaceAll(desc, "\r\n", " ")
 			desc = strings.ReplaceAll(desc, "\n", " ")
 
+			check := "  "
+			if m.selected[p.FullName] {
+				check = styleGreen.Render("✓ ")
+			}
 			line := fmt.Sprintf("%-30s  %-60s  %s", p.FullName, desc, styleDim.Render(distroStr))
 			if i == m.cursor {
-				sb.WriteString(styleSelected.Render(" > "+line) + "\n")
+				sb.WriteString(styleSelected.Render(" > "+check+line) + "\n")
 			} else {
-				sb.WriteString("   " + line + "\n")
+				sb.WriteString("   " + check + line + "\n")
 			}
 		}
 
-		if len(m.results) > 0 {
+		if len(m.selected) > 0 {
+			sb.WriteString("\n")
+			var selNames []string
+			for _, p := range m.results {
+				if m.selected[p.FullName] {
+					selNames = append(selNames, styleGreen.Render(p.FullName))
+				}
+			}
+			sb.WriteString(styleBorder.Render(
+				styleDim.Render("selected: ") + strings.Join(selNames, ", ") + "\n" +
+					styleDim.Render("press i to install all"),
+			) + "\n")
+		} else if len(m.results) > 0 {
 			sel := m.results[m.cursor]
 			sb.WriteString("\n")
 			sb.WriteString(styleBorder.Render(
