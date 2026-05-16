@@ -11,20 +11,28 @@ import (
 	"github.com/raphi/wtfc/api"
 )
 
+type mode int
+
+const (
+	modeSearch mode = iota
+	modeBrowse
+)
+
 type searchDoneMsg struct {
 	results []api.Project
 	err     error
 }
 
 type Model struct {
-	input    textinput.Model
-	results  []api.Project
-	cursor   int
-	loading  bool
-	err      error
-	width    int
-	height   int
+	input     textinput.Model
+	results   []api.Project
+	cursor    int
+	loading   bool
+	err       error
+	width     int
+	height    int
 	lastQuery string
+	mode      mode
 }
 
 var (
@@ -38,10 +46,10 @@ var (
 
 func New() Model {
 	ti := textinput.New()
-	ti.Placeholder = "z.B. neovim, hyprland, quickshell..."
+	ti.Placeholder = "e.g. neovim, hyprland, quickshell..."
 	ti.Focus()
 	ti.CharLimit = 100
-	return Model{input: ti}
+	return Model{input: ti, mode: modeSearch}
 }
 
 func (m Model) Init() tea.Cmd {
@@ -55,41 +63,73 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "esc":
-			return m, tea.Quit
-		case "enter":
-			q := strings.TrimSpace(m.input.Value())
-			if q != "" && q != m.lastQuery {
-				m.loading = true
-				m.lastQuery = q
-				m.cursor = 0
-				m.results = nil
-				m.err = nil
-				return m, doSearch(q)
+		if m.mode == modeSearch {
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				if len(m.results) > 0 {
+					m.mode = modeBrowse
+					m.input.Blur()
+					return m, nil
+				}
+				return m, tea.Quit
+			case "enter":
+				q := strings.TrimSpace(m.input.Value())
+				if q != "" {
+					m.loading = true
+					m.lastQuery = q
+					m.cursor = 0
+					m.results = nil
+					m.err = nil
+					m.mode = modeBrowse
+					m.input.Blur()
+					return m, doSearch(q)
+				}
 			}
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+		} else {
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc", "/":
+				m.mode = modeSearch
+				m.input.Focus()
+				return m, textinput.Blink
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down":
+				if m.cursor < len(m.results)-1 {
+					m.cursor++
+				}
+			case "y":
+				if len(m.results) > 0 {
+					exec.Command("wl-copy", m.results[m.cursor].EnableCmd()).Run()
+				}
+			case "i":
+				if len(m.results) > 0 {
+					p := m.results[m.cursor]
+					return m, tea.ExecProcess(
+						exec.Command("bash", "-c",
+							fmt.Sprintf("sudo dnf copr enable %s -y && sudo dnf install %s -y; echo; read -p 'Press Enter to return...'", p.FullName, p.Name),
+						), func(err error) tea.Msg {
+							return searchDoneMsg{results: m.results}
+						},
+					)
+				}
 			}
-		case "down", "j":
-			if m.cursor < len(m.results)-1 {
-				m.cursor++
-			}
-		case "y":
-			if len(m.results) > 0 {
-				cmd := m.results[m.cursor].EnableCmd()
-				exec.Command("wl-copy", cmd).Run()
-			}
+			return m, nil
 		}
 
 	case searchDoneMsg:
 		m.loading = false
 		if msg.err != nil {
 			m.err = msg.err
-		} else {
+		} else if msg.results != nil {
 			m.results = msg.results
 		}
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -108,27 +148,28 @@ func (m Model) View() string {
 	var sb strings.Builder
 
 	sb.WriteString(styleTitle.Render("wtfc — where the fuck is copr") + "\n")
-	sb.WriteString(styleDim.Render("Enter = suchen  ↑↓/jk = navigieren  y = kopieren  esc = raus") + "\n\n")
+
+	if m.mode == modeSearch {
+		sb.WriteString(styleDim.Render("Enter = search  esc = browse") + "\n\n")
+	} else {
+		sb.WriteString(styleDim.Render("↑↓ = navigate  i = install  y = copy  / = new search  q = quit") + "\n\n")
+	}
+
 	sb.WriteString(m.input.View() + "\n\n")
 
 	if m.loading {
-		sb.WriteString(styleDim.Render("suche...") + "\n")
+		sb.WriteString(styleDim.Render("searching...") + "\n")
 		return sb.String()
 	}
 
 	if m.err != nil {
-		sb.WriteString(styleRed.Render("Fehler: "+m.err.Error()) + "\n")
+		sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
 		return sb.String()
 	}
 
 	if len(m.results) == 0 && m.lastQuery != "" {
-		sb.WriteString(styleDim.Render("keine Ergebnisse") + "\n")
+		sb.WriteString(styleDim.Render("no results") + "\n")
 		return sb.String()
-	}
-
-	maxWidth := m.width - 4
-	if maxWidth < 40 {
-		maxWidth = 80
 	}
 
 	for i, p := range m.results {
