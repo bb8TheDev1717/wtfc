@@ -14,8 +14,9 @@ import (
 type mode int
 
 const (
-	modeSearch mode = iota
-	modeBrowse
+	modeMenu mode = iota
+	modeCoprSearch
+	modeCoprBrowse
 )
 
 type searchDoneMsg struct {
@@ -30,15 +31,16 @@ type installMsg struct {
 }
 
 type Model struct {
-	input     textinput.Model
-	results   []api.Project
-	cursor    int
-	loading   bool
-	err       error
-	width     int
-	height    int
-	lastQuery string
-	mode      mode
+	input      textinput.Model
+	results    []api.Project
+	cursor     int
+	menuCursor int
+	loading    bool
+	err        error
+	width      int
+	height     int
+	lastQuery  string
+	mode       mode
 }
 
 var (
@@ -50,16 +52,20 @@ var (
 	styleBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("99")).Padding(0, 1)
 )
 
+var menuItems = []string{
+	"Search COPR repositories",
+	"Search DNF packages",
+}
+
 func New() Model {
 	ti := textinput.New()
 	ti.Placeholder = "e.g. neovim, hyprland, quickshell..."
-	ti.Focus()
 	ti.CharLimit = 100
-	return Model{input: ti, mode: modeSearch}
+	return Model{input: ti, mode: modeMenu}
 }
 
 func (m Model) Init() tea.Cmd {
-	return textinput.Blink
+	return nil
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -69,17 +75,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case tea.KeyMsg:
-		if m.mode == modeSearch {
+		switch m.mode {
+		case modeMenu:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "up":
+				if m.menuCursor > 0 {
+					m.menuCursor--
+				}
+			case "down":
+				if m.menuCursor < len(menuItems)-1 {
+					m.menuCursor++
+				}
+			case "enter":
+				switch m.menuCursor {
+				case 0:
+					m.mode = modeCoprSearch
+					m.input.Placeholder = "e.g. neovim, hyprland, quickshell..."
+					m.input.Focus()
+					return m, textinput.Blink
+				case 1:
+					// DNF mode coming soon
+				}
+			}
+
+		case modeCoprSearch:
 			switch msg.String() {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
 				if len(m.results) > 0 {
-					m.mode = modeBrowse
+					m.mode = modeCoprBrowse
 					m.input.Blur()
 					return m, nil
 				}
-				return m, tea.Quit
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				return m, nil
 			case "enter":
 				q := strings.TrimSpace(m.input.Value())
 				if q != "" {
@@ -88,17 +122,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 0
 					m.results = nil
 					m.err = nil
-					m.mode = modeBrowse
+					m.mode = modeCoprBrowse
 					m.input.Blur()
-					return m, doSearch(q)
+					return m, doCoprSearch(q)
 				}
 			}
-		} else {
+
+		case modeCoprBrowse:
 			switch msg.String() {
 			case "ctrl+c", "q":
 				return m, tea.Quit
-			case "esc", "/":
-				m.mode = modeSearch
+			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.results = nil
+				m.lastQuery = ""
+				return m, nil
+			case "/":
+				m.mode = modeCoprSearch
 				m.input.Focus()
 				return m, textinput.Blink
 			case "up":
@@ -164,7 +206,7 @@ func fetchAndInstall(p api.Project) tea.Cmd {
 	}
 }
 
-func doSearch(query string) tea.Cmd {
+func doCoprSearch(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, err := api.Search(query, 20)
 		return searchDoneMsg{results: results, err: err}
@@ -173,62 +215,69 @@ func doSearch(query string) tea.Cmd {
 
 func (m Model) View() string {
 	var sb strings.Builder
-
 	sb.WriteString(styleTitle.Render("wtfc — where the fuck is copr") + "\n")
 
-	if m.mode == modeSearch {
-		sb.WriteString(styleDim.Render("Enter = search  esc = browse") + "\n\n")
-	} else {
-		sb.WriteString(styleDim.Render("↑↓ = navigate  i = install  y = copy  / = new search  q = quit") + "\n\n")
-	}
-
-	sb.WriteString(m.input.View() + "\n\n")
-
-	if m.loading {
-		sb.WriteString(styleDim.Render("searching...") + "\n")
-		return sb.String()
-	}
-
-	if m.err != nil {
-		sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
-		return sb.String()
-	}
-
-	if len(m.results) == 0 && m.lastQuery != "" {
-		sb.WriteString(styleDim.Render("no results") + "\n")
-		return sb.String()
-	}
-
-	for i, p := range m.results {
-		distros := p.Distros()
-		distroStr := strings.Join(distros, ", ")
-		if len(distroStr) > 40 {
-			distroStr = distroStr[:37] + "..."
+	switch m.mode {
+	case modeMenu:
+		sb.WriteString(styleDim.Render("↑↓ = navigate  Enter = select  q = quit") + "\n\n")
+		for i, item := range menuItems {
+			if i == m.menuCursor {
+				sb.WriteString(styleSelected.Render(" > "+item) + "\n")
+			} else {
+				sb.WriteString("   " + item + "\n")
+			}
 		}
 
-		desc := p.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
+	case modeCoprSearch:
+		sb.WriteString(styleDim.Render("Enter = search  esc = menu") + "\n\n")
+		sb.WriteString(m.input.View() + "\n")
+
+	case modeCoprBrowse:
+		sb.WriteString(styleDim.Render("↑↓ = navigate  i = install  y = copy  / = search  esc = menu  q = quit") + "\n\n")
+		sb.WriteString(m.input.View() + "\n\n")
+
+		if m.loading {
+			sb.WriteString(styleDim.Render("searching...") + "\n")
+			return sb.String()
 		}
-		desc = strings.ReplaceAll(desc, "\r\n", " ")
-		desc = strings.ReplaceAll(desc, "\n", " ")
-
-		line := fmt.Sprintf("%-30s  %-60s  %s", p.FullName, desc, styleDim.Render(distroStr))
-
-		if i == m.cursor {
-			sb.WriteString(styleSelected.Render(" > "+line) + "\n")
-		} else {
-			sb.WriteString("   " + line + "\n")
+		if m.err != nil {
+			sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
+			return sb.String()
 		}
-	}
+		if len(m.results) == 0 && m.lastQuery != "" {
+			sb.WriteString(styleDim.Render("no results") + "\n")
+			return sb.String()
+		}
 
-	if len(m.results) > 0 {
-		selected := m.results[m.cursor]
-		sb.WriteString("\n")
-		sb.WriteString(styleBorder.Render(
-			styleGreen.Render(selected.EnableCmd()) + "\n" +
-				styleDim.Render("sudo dnf install "+selected.Name),
-		) + "\n")
+		for i, p := range m.results {
+			distros := p.Distros()
+			distroStr := strings.Join(distros, ", ")
+			if len(distroStr) > 40 {
+				distroStr = distroStr[:37] + "..."
+			}
+			desc := p.Description
+			if len(desc) > 60 {
+				desc = desc[:57] + "..."
+			}
+			desc = strings.ReplaceAll(desc, "\r\n", " ")
+			desc = strings.ReplaceAll(desc, "\n", " ")
+
+			line := fmt.Sprintf("%-30s  %-60s  %s", p.FullName, desc, styleDim.Render(distroStr))
+			if i == m.cursor {
+				sb.WriteString(styleSelected.Render(" > "+line) + "\n")
+			} else {
+				sb.WriteString("   " + line + "\n")
+			}
+		}
+
+		if len(m.results) > 0 {
+			sel := m.results[m.cursor]
+			sb.WriteString("\n")
+			sb.WriteString(styleBorder.Render(
+				styleGreen.Render(sel.EnableCmd()) + "\n" +
+					styleDim.Render("sudo dnf install "+sel.Name),
+			) + "\n")
+		}
 	}
 
 	return sb.String()
