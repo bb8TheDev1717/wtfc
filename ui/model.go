@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/raphi/wtfc-d/api"
+	"github.com/bb8TheDev1717/wtfc-d/api"
 )
 
 type mode int
