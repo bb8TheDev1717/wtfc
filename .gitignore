@@ -1,0 +1,15 @@
+# Build
+wtfc
+
+# Go
+*.exe
+*.test
+*.out
+
+# IDE / Tools
+.claude/
+.idea/
+.vscode/
+
+# OS
+.DS_Store
