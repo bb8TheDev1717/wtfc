@@ -1,4 +1,4 @@
-module github.com/raphi/wtfc
+module github.com/raphi/wtfc-d
 
 go 1.26.3
 

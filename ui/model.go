@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/raphi/wtfc/api"
+	"github.com/raphi/wtfc-d/api"
 )
 
 type mode int
@@ -425,8 +425,8 @@ func (m Model) viewMenu(w, h int) string {
 	panelW := 44
 
 	header := lipgloss.JoinVertical(lipgloss.Center,
-		styleTitle.Render("wtfc"),
-		styleSubtitle.Render("where the fuck is copr"),
+		styleTitle.Render("wtfc-d"),
+		styleSubtitle.Render("where the fuck is copr & dnf"),
 	)
 
 	var items strings.Builder
@@ -456,13 +456,13 @@ func (m Model) viewMenu(w, h int) string {
 
 func (m Model) viewSearch(w, h int) string {
 	isCopr := m.mode == modeCoprSearch
-	title := "COPR Search"
-	if !isCopr {
-		title = "DNF Search"
+	name, title := "wtfd", "DNF Search"
+	if isCopr {
+		name, title = "wtfc", "COPR Search"
 	}
 
 	header := lipgloss.JoinVertical(lipgloss.Left,
-		styleTitle.Render("wtfc")+" "+styleDim.Render("/ "+title),
+		styleTitle.Render(name)+" "+styleDim.Render("/ "+title),
 		"",
 		m.input.View(),
 		"",
@@ -475,16 +475,16 @@ func (m Model) viewSearch(w, h int) string {
 
 func (m Model) viewBrowse(w, h int) string {
 	isCopr := m.mode == modeCoprBrowse
-	title := "DNF Results"
+	name, title := "wtfd", "DNF Results"
 	if isCopr {
-		title = "COPR Results"
+		name, title = "wtfc", "COPR Results"
 	}
 
 	panelW := w - 4
 
 	// Header
 	var header strings.Builder
-	header.WriteString(styleTitle.Render("wtfc") + " " + styleDim.Render("/ "+title) + "\n")
+	header.WriteString(styleTitle.Render(name) + " " + styleDim.Render("/ "+title) + "\n")
 	header.WriteString(m.input.View() + "\n")
 	hints := "↑↓ navigate  ·  space select  ·  i install  ·  / search  ·  esc menu  ·  q quit"
 	if isCopr {

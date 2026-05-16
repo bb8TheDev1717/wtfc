@@ -5,7 +5,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/raphi/wtfc/ui"
+	"github.com/raphi/wtfc-d/ui"
 )
 
 func main() {
