@@ -43,33 +43,66 @@ type installMultiMsg struct {
 }
 
 type Model struct {
-	input       textinput.Model
-	results     []api.Project
-	dnfResults  []api.DNFPackage
-	selected    map[string]bool
-	cursor      int
-	menuCursor  int
-	loading     bool
-	err         error
-	width       int
-	height      int
-	lastQuery   string
-	mode        mode
+	input      textinput.Model
+	results    []api.Project
+	dnfResults []api.DNFPackage
+	selected   map[string]bool
+	cursor     int
+	menuCursor int
+	loading    bool
+	err        error
+	width      int
+	height     int
+	lastQuery  string
+	mode       mode
 }
 
 var (
-	styleTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
-	styleSelected = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true)
-	styleDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleGreen    = lipgloss.NewStyle().Foreground(lipgloss.Color("76"))
-	styleRed      = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	styleBorder   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("99")).Padding(0, 1)
+	colorPurple = lipgloss.Color("99")
+	colorGreen  = lipgloss.Color("76")
+	colorDim    = lipgloss.Color("243")
+	colorRed    = lipgloss.Color("196")
+	colorBg     = lipgloss.Color("235")
+	colorHover  = lipgloss.Color("236")
+
+	styleTitle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colorPurple)
+
+	styleSubtitle = lipgloss.NewStyle().
+			Foreground(colorDim).
+			Italic(true)
+
+	styleSelected = lipgloss.NewStyle().
+			Background(colorHover).
+			Bold(true).
+			Foreground(lipgloss.Color("255"))
+
+	styleDim   = lipgloss.NewStyle().Foreground(colorDim)
+	styleGreen = lipgloss.NewStyle().Foreground(colorGreen)
+	styleRed   = lipgloss.NewStyle().Foreground(colorRed)
+
+	stylePanel = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorPurple).
+			Padding(1, 2)
+
+	styleFooter = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(colorGreen).
+			Padding(0, 1)
+
+	styleHint = lipgloss.NewStyle().
+			Foreground(colorDim).
+			Italic(true)
 )
 
 var menuItems = []string{
-	"Search COPR repositories",
-	"Search DNF packages",
+	"  Search COPR repositories",
+	"  Search DNF packages",
 }
+
+var menuIcons = []string{"󰏗", "󰏖"}
 
 func New() Model {
 	ti := textinput.New()
@@ -235,6 +268,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.SetValue("")
 				m.results = nil
 				m.lastQuery = ""
+				m.selected = make(map[string]bool)
 				return m, nil
 			case "/":
 				m.mode = modeCoprSearch
@@ -367,136 +401,216 @@ func doCoprSearch(query string) tea.Cmd {
 }
 
 func (m Model) View() string {
-	var sb strings.Builder
-	sb.WriteString(styleTitle.Render("wtfc — where the fuck is copr") + "\n")
+	w := m.width
+	h := m.height
+	if w == 0 {
+		w = 80
+	}
+	if h == 0 {
+		h = 24
+	}
 
 	switch m.mode {
 	case modeMenu:
-		sb.WriteString(styleDim.Render("↑↓ = navigate  Enter = select  q = quit") + "\n\n")
-		for i, item := range menuItems {
-			if i == m.menuCursor {
-				sb.WriteString(styleSelected.Render(" > "+item) + "\n")
-			} else {
-				sb.WriteString("   " + item + "\n")
-			}
-		}
-
+		return m.viewMenu(w, h)
 	case modeCoprSearch, modeDNFSearch:
-		sb.WriteString(styleDim.Render("Enter = search  esc = menu") + "\n\n")
-		sb.WriteString(m.input.View() + "\n")
+		return m.viewSearch(w, h)
+	case modeCoprBrowse, modeDNFBrowse:
+		return m.viewBrowse(w, h)
+	}
+	return ""
+}
 
-	case modeDNFBrowse:
-		sb.WriteString(styleDim.Render("↑↓ = navigate  space = select  i = install  / = search  esc = menu  q = quit") + "\n\n")
-		sb.WriteString(m.input.View() + "\n\n")
+func (m Model) viewMenu(w, h int) string {
+	panelW := 44
 
-		if m.loading {
-			sb.WriteString(styleDim.Render("searching... (this may take a moment)") + "\n")
-			return sb.String()
-		}
-		if m.err != nil {
-			sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
-			return sb.String()
-		}
-		if len(m.dnfResults) == 0 && m.lastQuery != "" {
-			sb.WriteString(styleDim.Render("no results") + "\n")
-			return sb.String()
-		}
+	header := lipgloss.JoinVertical(lipgloss.Center,
+		styleTitle.Render("wtfc"),
+		styleSubtitle.Render("where the fuck is copr"),
+	)
 
-		for i, p := range m.dnfResults {
-			check := "  "
-			if m.selected[p.Name] {
-				check = styleGreen.Render("✓ ")
-			}
-			line := fmt.Sprintf("%-30s  %s", p.Name, p.Summary)
-			if i == m.cursor {
-				sb.WriteString(styleSelected.Render(" > "+check+line) + "\n")
-			} else {
-				sb.WriteString("   " + check + line + "\n")
-			}
+	var items strings.Builder
+	for i, item := range menuItems {
+		icon := menuIcons[i]
+		label := icon + item
+		if i == m.menuCursor {
+			items.WriteString(styleSelected.Width(panelW-6).Render(" › "+label) + "\n")
+		} else {
+			items.WriteString(styleDim.Render("   "+label) + "\n")
 		}
+	}
 
-		if len(m.selected) > 0 {
-			sb.WriteString("\n")
-			var selNames []string
-			for _, p := range m.dnfResults {
-				if m.selected[p.Name] {
-					selNames = append(selNames, styleGreen.Render(p.Name))
-				}
-			}
-			sb.WriteString(styleBorder.Render(
-				styleDim.Render("selected: ")+strings.Join(selNames, ", ")+"\n"+
-					styleDim.Render("press i to install all"),
-			) + "\n")
-		} else if len(m.dnfResults) > 0 {
-			sb.WriteString("\n")
-			sb.WriteString(styleBorder.Render(
-				styleGreen.Render("sudo dnf install "+m.dnfResults[m.cursor].Name),
-			) + "\n")
+	hints := styleHint.Render("↑↓ navigate  ·  Enter select  ·  q quit")
+
+	content := lipgloss.JoinVertical(lipgloss.Center,
+		header,
+		"",
+		strings.TrimRight(items.String(), "\n"),
+		"",
+		hints,
+	)
+
+	panel := stylePanel.Width(panelW).Render(content)
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m Model) viewSearch(w, h int) string {
+	isCopr := m.mode == modeCoprSearch
+	title := "COPR Search"
+	if !isCopr {
+		title = "DNF Search"
+	}
+
+	header := lipgloss.JoinVertical(lipgloss.Left,
+		styleTitle.Render("wtfc")+" "+styleDim.Render("/ "+title),
+		"",
+		m.input.View(),
+		"",
+		styleHint.Render("Enter = search  ·  esc = back  ·  ctrl+c = quit"),
+	)
+
+	panel := stylePanel.Width(w - 8).Render(header)
+	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func (m Model) viewBrowse(w, h int) string {
+	isCopr := m.mode == modeCoprBrowse
+	title := "DNF Results"
+	if isCopr {
+		title = "COPR Results"
+	}
+
+	panelW := w - 4
+
+	// Header
+	var header strings.Builder
+	header.WriteString(styleTitle.Render("wtfc") + " " + styleDim.Render("/ "+title) + "\n")
+	header.WriteString(m.input.View() + "\n")
+	hints := "↑↓ navigate  ·  space select  ·  i install  ·  / search  ·  esc menu  ·  q quit"
+	if isCopr {
+		hints = "↑↓ navigate  ·  space select  ·  i install  ·  y copy  ·  / search  ·  esc menu"
+	}
+	header.WriteString(styleHint.Render(hints))
+
+	headerPanel := stylePanel.Width(panelW).Render(header.String())
+
+	// Body
+	var body strings.Builder
+	if m.loading {
+		body.WriteString("\n  " + styleDim.Render("searching...") + "\n")
+	} else if m.err != nil {
+		body.WriteString("\n  " + styleRed.Render("error: "+m.err.Error()) + "\n")
+	} else if isCopr {
+		m.renderCoprResults(&body, panelW)
+	} else {
+		m.renderDNFResults(&body, panelW)
+	}
+
+	// Footer
+	footer := m.renderFooter(isCopr, panelW)
+
+	full := lipgloss.JoinVertical(lipgloss.Left,
+		headerPanel,
+		body.String(),
+		footer,
+	)
+	return lipgloss.PlaceHorizontal(w, lipgloss.Center, full)
+}
+
+func (m Model) renderCoprResults(sb *strings.Builder, panelW int) {
+	if len(m.results) == 0 && m.lastQuery != "" {
+		sb.WriteString("\n  " + styleDim.Render("no results") + "\n")
+		return
+	}
+	maxDesc := panelW - 40
+	if maxDesc < 20 {
+		maxDesc = 20
+	}
+	for i, p := range m.results {
+		distros := p.Distros()
+		distroStr := strings.Join(distros, ", ")
+		if len(distroStr) > 35 {
+			distroStr = distroStr[:32] + "..."
 		}
-
-	case modeCoprBrowse:
-		sb.WriteString(styleDim.Render("↑↓ = navigate  space = select  i = install  y = copy  / = search  esc = menu  q = quit") + "\n\n")
-		sb.WriteString(m.input.View() + "\n\n")
-
-		if m.loading {
-			sb.WriteString(styleDim.Render("searching...") + "\n")
-			return sb.String()
+		desc := p.Description
+		if len(desc) > maxDesc {
+			desc = desc[:maxDesc-3] + "..."
 		}
-		if m.err != nil {
-			sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
-			return sb.String()
-		}
-		if len(m.results) == 0 && m.lastQuery != "" {
-			sb.WriteString(styleDim.Render("no results") + "\n")
-			return sb.String()
-		}
+		desc = strings.ReplaceAll(strings.ReplaceAll(desc, "\r\n", " "), "\n", " ")
 
-		for i, p := range m.results {
-			distros := p.Distros()
-			distroStr := strings.Join(distros, ", ")
-			if len(distroStr) > 40 {
-				distroStr = distroStr[:37] + "..."
-			}
-			desc := p.Description
-			if len(desc) > 60 {
-				desc = desc[:57] + "..."
-			}
-			desc = strings.ReplaceAll(desc, "\r\n", " ")
-			desc = strings.ReplaceAll(desc, "\n", " ")
-
-			check := "  "
-			if m.selected[p.FullName] {
-				check = styleGreen.Render("✓ ")
-			}
-			line := fmt.Sprintf("%-30s  %-60s  %s", p.FullName, desc, styleDim.Render(distroStr))
-			if i == m.cursor {
-				sb.WriteString(styleSelected.Render(" > "+check+line) + "\n")
-			} else {
-				sb.WriteString("   " + check + line + "\n")
-			}
+		check := "  "
+		if m.selected[p.FullName] {
+			check = styleGreen.Render("✓ ")
 		}
+		line := fmt.Sprintf("%-28s  %-*s  %s", p.FullName, maxDesc, desc, styleDim.Render(distroStr))
+		if i == m.cursor {
+			sb.WriteString(styleSelected.Width(panelW).Render(" › "+check+line) + "\n")
+		} else {
+			sb.WriteString("   " + check + line + "\n")
+		}
+	}
+}
 
-		if len(m.selected) > 0 {
-			sb.WriteString("\n")
-			var selNames []string
+func (m Model) renderDNFResults(sb *strings.Builder, panelW int) {
+	if len(m.dnfResults) == 0 && m.lastQuery != "" {
+		sb.WriteString("\n  " + styleDim.Render("no results") + "\n")
+		return
+	}
+	maxSummary := panelW - 36
+	if maxSummary < 20 {
+		maxSummary = 20
+	}
+	for i, p := range m.dnfResults {
+		summary := p.Summary
+		if len(summary) > maxSummary {
+			summary = summary[:maxSummary-3] + "..."
+		}
+		check := "  "
+		if m.selected[p.Name] {
+			check = styleGreen.Render("✓ ")
+		}
+		line := fmt.Sprintf("%-28s  %s", p.Name, summary)
+		if i == m.cursor {
+			sb.WriteString(styleSelected.Width(panelW).Render(" › "+check+line) + "\n")
+		} else {
+			sb.WriteString("   " + check + line + "\n")
+		}
+	}
+}
+
+func (m Model) renderFooter(isCopr bool, panelW int) string {
+	if len(m.selected) > 0 {
+		var selNames []string
+		if isCopr {
 			for _, p := range m.results {
 				if m.selected[p.FullName] {
 					selNames = append(selNames, styleGreen.Render(p.FullName))
 				}
 			}
-			sb.WriteString(styleBorder.Render(
-				styleDim.Render("selected: ") + strings.Join(selNames, ", ") + "\n" +
-					styleDim.Render("press i to install all"),
-			) + "\n")
-		} else if len(m.results) > 0 {
-			sel := m.results[m.cursor]
-			sb.WriteString("\n")
-			sb.WriteString(styleBorder.Render(
-				styleGreen.Render(sel.EnableCmd()) + "\n" +
-					styleDim.Render("sudo dnf install "+sel.Name),
-			) + "\n")
+		} else {
+			for _, p := range m.dnfResults {
+				if m.selected[p.Name] {
+					selNames = append(selNames, styleGreen.Render(p.Name))
+				}
+			}
 		}
+		return styleFooter.Width(panelW).Render(
+			styleDim.Render("selected: ") + strings.Join(selNames, styleDim.Render(", ")) + "\n" +
+				styleHint.Render("press i to install all"),
+		)
 	}
 
-	return sb.String()
+	if isCopr && len(m.results) > 0 {
+		sel := m.results[m.cursor]
+		return styleFooter.Width(panelW).Render(
+			styleGreen.Render(sel.EnableCmd()) + "\n" +
+				styleDim.Render("sudo dnf install "+sel.Name),
+		)
+	}
+	if !isCopr && len(m.dnfResults) > 0 {
+		return styleFooter.Width(panelW).Render(
+			styleGreen.Render("sudo dnf install " + m.dnfResults[m.cursor].Name),
+		)
+	}
+	return ""
 }
