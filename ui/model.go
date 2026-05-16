@@ -191,16 +191,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.results = nil
+				return m, nil
+			case "enter":
 				if len(m.results) > 0 {
 					m.mode = modeCoprBrowse
 					m.input.Blur()
 					return m, nil
 				}
-				m.mode = modeMenu
-				m.input.Blur()
-				m.input.SetValue("")
-				return m, nil
-			case "enter":
 				q := strings.TrimSpace(m.input.Value())
 				if q != "" {
 					m.loading = true
@@ -208,8 +209,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 0
 					m.results = nil
 					m.err = nil
-					m.mode = modeCoprBrowse
-					m.input.Blur()
 					return m, doCoprSearch(q)
 				}
 			}
@@ -219,16 +218,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.dnfResults = nil
+				return m, nil
+			case "enter":
 				if len(m.dnfResults) > 0 {
 					m.mode = modeDNFBrowse
 					m.input.Blur()
 					return m, nil
 				}
-				m.mode = modeMenu
-				m.input.Blur()
-				m.input.SetValue("")
-				return m, nil
-			case "enter":
 				q := strings.TrimSpace(m.input.Value())
 				if q != "" {
 					m.loading = true
@@ -236,8 +236,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = 0
 					m.dnfResults = nil
 					m.err = nil
-					m.mode = modeDNFBrowse
-					m.input.Blur()
 					return m, doDNFSearch(q)
 				}
 			}
@@ -349,24 +347,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c":
 				return m, tea.Quit
 			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.removeResults = nil
+				return m, nil
+			case "enter":
 				if len(m.removeResults) > 0 {
 					m.mode = modeRemoveBrowse
 					m.input.Blur()
 					return m, nil
 				}
-				m.mode = modeMenu
-				m.input.Blur()
-				m.input.SetValue("")
-				return m, nil
-			case "enter":
 				q := strings.TrimSpace(m.input.Value())
 				m.loading = true
 				m.lastQuery = q
 				m.cursor = 0
 				m.removeResults = nil
 				m.err = nil
-				m.mode = modeRemoveBrowse
-				m.input.Blur()
 				return m, doRemoveSearch(q)
 			}
 
@@ -569,18 +566,12 @@ func (m *Model) handleFuzzyTrigger(msg fuzzyTriggerMsg) (tea.Model, tea.Cmd) {
 	switch m.mode {
 	case modeCoprSearch:
 		m.results = nil
-		m.mode = modeCoprBrowse
-		m.input.Blur()
 		return m, doCoprSearch(q)
 	case modeRemoveSearch:
 		m.removeResults = nil
-		m.mode = modeRemoveBrowse
-		m.input.Blur()
 		return m, doRemoveSearch(q)
 	default:
 		m.dnfResults = nil
-		m.mode = modeDNFBrowse
-		m.input.Blur()
 		return m, doDNFSearch(q)
 	}
 }
@@ -696,23 +687,63 @@ func (m Model) viewMenu(w, h int) string {
 
 func (m Model) viewSearch(w, h int) string {
 	isCopr := m.mode == modeCoprSearch
+	isRemove := m.mode == modeRemoveSearch
 	name, title := "wtfd", "DNF Search"
 	if isCopr {
 		name, title = "wtfc", "COPR Search"
-	} else if m.mode == modeRemoveSearch {
+	} else if isRemove {
 		name, title = "wtfd", "Remove"
 	}
 
-	header := lipgloss.JoinVertical(lipgloss.Left,
-		styleTitle.Render(name)+" "+styleDim.Render("/ "+title),
-		"",
-		m.input.View(),
-		"",
-		styleHint.Render("Enter = search  ·  esc = back  ·  ctrl+c = quit"),
-	)
+	panelW := w - 8
 
-	panel := stylePanel.Width(w - 8).Render(header)
+	var sb strings.Builder
+	sb.WriteString(styleTitle.Render(name) + " " + styleDim.Render("/ "+title) + "\n\n")
+	sb.WriteString(m.input.View() + "\n\n")
+
+	if m.loading {
+		sb.WriteString(styleDim.Render("searching...") + "\n")
+	} else if isCopr && len(m.results) > 0 {
+		sb.WriteString(styleHint.Render(fmt.Sprintf("%d results — Enter to navigate", len(m.results))) + "\n")
+		for i, p := range m.results {
+			if i >= 5 {
+				sb.WriteString(styleDim.Render(fmt.Sprintf("  ... and %d more", len(m.results)-5)) + "\n")
+				break
+			}
+			sb.WriteString("  " + styleGreen.Render(p.FullName) + "  " + styleDim.Render(truncate(p.Description, 50)) + "\n")
+		}
+	} else if !isCopr && !isRemove && len(m.dnfResults) > 0 {
+		sb.WriteString(styleHint.Render(fmt.Sprintf("%d results — Enter to navigate", len(m.dnfResults))) + "\n")
+		for i, p := range m.dnfResults {
+			if i >= 5 {
+				sb.WriteString(styleDim.Render(fmt.Sprintf("  ... and %d more", len(m.dnfResults)-5)) + "\n")
+				break
+			}
+			sb.WriteString("  " + styleGreen.Render(p.Name) + "  " + styleDim.Render(truncate(p.Summary, 50)) + "\n")
+		}
+	} else if isRemove && len(m.removeResults) > 0 {
+		sb.WriteString(styleHint.Render(fmt.Sprintf("%d results — Enter to navigate", len(m.removeResults))) + "\n")
+		for i, p := range m.removeResults {
+			if i >= 5 {
+				sb.WriteString(styleDim.Render(fmt.Sprintf("  ... and %d more", len(m.removeResults)-5)) + "\n")
+				break
+			}
+			sb.WriteString("  " + styleGreen.Render(p.Name) + "  " + styleDim.Render(p.Version) + "\n")
+		}
+	}
+
+	sb.WriteString("\n" + styleHint.Render("Enter = browse results  ·  esc = menu  ·  ctrl+c = quit"))
+
+	panel := stylePanel.Width(panelW).Render(sb.String())
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, panel)
+}
+
+func truncate(s string, max int) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", " "), "\n", " ")
+	if len(s) > max {
+		return s[:max-3] + "..."
+	}
+	return s
 }
 
 func (m Model) viewBrowse(w, h int) string {
