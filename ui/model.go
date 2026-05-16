@@ -23,6 +23,12 @@ type searchDoneMsg struct {
 	err     error
 }
 
+type installMsg struct {
+	project  api.Project
+	packages []string
+	err      error
+}
+
 type Model struct {
 	input     textinput.Model
 	results   []api.Project
@@ -110,13 +116,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "i":
 				if len(m.results) > 0 {
 					p := m.results[m.cursor]
-					return m, tea.ExecProcess(
-						exec.Command("bash", "-c",
-							fmt.Sprintf("sudo dnf copr enable %s -y && sudo dnf install %s -y; echo; read -p 'Press Enter to return...'", p.FullName, p.Name),
-						), func(err error) tea.Msg {
-							return searchDoneMsg{results: m.results}
-						},
-					)
+					m.loading = true
+					return m, fetchAndInstall(p)
 				}
 			}
 			return m, nil
@@ -130,11 +131,37 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.results = msg.results
 		}
 		return m, nil
+
+	case installMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+			return m, nil
+		}
+		p := msg.project
+		pkgs := strings.Join(msg.packages, " ")
+		return m, tea.ExecProcess(
+			exec.Command("bash", "-c",
+				fmt.Sprintf("sudo dnf copr enable %s -y && sudo dnf install %s -y; echo; read -p 'Press Enter to return...'", p.FullName, pkgs),
+			), func(err error) tea.Msg {
+				return searchDoneMsg{results: m.results}
+			},
+		)
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func fetchAndInstall(p api.Project) tea.Cmd {
+	return func() tea.Msg {
+		pkgs, err := api.GetPackages(p.OwnerName, p.Name)
+		if err != nil || len(pkgs) == 0 {
+			pkgs = []string{p.Name}
+		}
+		return installMsg{project: p, packages: pkgs, err: err}
+	}
 }
 
 func doSearch(query string) tea.Cmd {

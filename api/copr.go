@@ -44,7 +44,7 @@ func Search(query string, limit int) ([]Project, error) {
 
 	var active []Project
 	for _, p := range result.Items {
-		if p.isActive() {
+		if p.supportsCurrentSystem() {
 			active = append(active, p)
 		}
 	}
@@ -65,11 +65,11 @@ func Search(query string, limit int) ([]Project, error) {
 	return active, nil
 }
 
-var activeDistros = []string{"fedora-42", "fedora-43", "fedora-44", "fedora-rawhide"}
+var supportedDistros = []string{"fedora-42", "fedora-43", "fedora-44", "fedora-rawhide"}
 
-func (p Project) isActive() bool {
+func (p Project) supportsCurrentSystem() bool {
 	for chroot := range p.ChootRepos {
-		for _, d := range activeDistros {
+		for _, d := range supportedDistros {
 			if strings.HasPrefix(chroot, d) {
 				return true
 			}
@@ -99,4 +99,30 @@ func (p Project) Distros() []string {
 
 func (p Project) EnableCmd() string {
 	return fmt.Sprintf("sudo dnf copr enable %s", p.FullName)
+}
+
+type Package struct {
+	Name string `json:"name"`
+}
+
+func GetPackages(owner, project string) ([]string, error) {
+	u := fmt.Sprintf("%s/package/list?ownername=%s&projectname=%s&limit=50", baseURL, url.QueryEscape(owner), url.QueryEscape(project))
+	resp, err := http.Get(u)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Items []Package `json:"items"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	names := make([]string, len(result.Items))
+	for i, pkg := range result.Items {
+		names[i] = pkg.Name
+	}
+	return names, nil
 }
