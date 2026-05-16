@@ -22,6 +22,7 @@ const (
 	modeDNFBrowse
 	modeRemoveSearch
 	modeRemoveBrowse
+	modeUpdateBrowse
 )
 
 type searchDoneMsg struct {
@@ -55,11 +56,17 @@ type removeDoneMsg struct {
 	err     error
 }
 
+type updateDoneMsg struct {
+	results []api.UpdatePackage
+	err     error
+}
+
 type Model struct {
 	input          textinput.Model
 	results        []api.Project
 	dnfResults     []api.DNFPackage
 	removeResults  []api.InstalledPackage
+	updateResults  []api.UpdatePackage
 	selected       map[string]bool
 	cursor         int
 	menuCursor     int
@@ -116,9 +123,10 @@ var menuItems = []string{
 	"  Search COPR repositories",
 	"  Search DNF packages",
 	"  Remove installed packages",
+	"  Check for updates",
 }
 
-var menuIcons = []string{"󰏗", "󰏖", "󰆴"}
+var menuIcons = []string{"󰏗", "󰏖", "󰆴", "󰚰"}
 
 func New() Model {
 	ti := textinput.New()
@@ -168,6 +176,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Placeholder = "search installed packages..."
 					m.input.Focus()
 					return m, textinput.Blink
+				case 3:
+					m.mode = modeUpdateBrowse
+					m.loading = true
+					m.updateResults = nil
+					m.cursor = 0
+					m.selected = make(map[string]bool)
+					return m, doGetUpdates()
 				}
 			}
 
@@ -276,6 +291,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						},
 					)
 				}
+			}
+			return m, nil
+
+		case modeUpdateBrowse:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc":
+				m.mode = modeMenu
+				m.updateResults = nil
+				m.selected = make(map[string]bool)
+				return m, nil
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down":
+				if m.cursor < len(m.updateResults)-1 {
+					m.cursor++
+				}
+			case " ":
+				if len(m.updateResults) > 0 {
+					key := m.updateResults[m.cursor].Name
+					m.selected[key] = !m.selected[key]
+				}
+			case "i":
+				if len(m.updateResults) > 0 {
+					var pkgs []string
+					if len(m.selected) > 0 {
+						for _, p := range m.updateResults {
+							if m.selected[p.Name] {
+								pkgs = append(pkgs, p.Name)
+							}
+						}
+					} else {
+						pkgs = []string{m.updateResults[m.cursor].Name}
+					}
+					return m, tea.ExecProcess(
+						exec.Command("bash", "-c",
+							fmt.Sprintf("sudo dnf upgrade %s -y; echo; read -p 'Press Enter to return...'", strings.Join(pkgs, " ")),
+						), func(err error) tea.Msg {
+							return updateDoneMsg{results: m.updateResults}
+						},
+					)
+				}
+			case "I":
+				return m, tea.ExecProcess(
+					exec.Command("bash", "-c", "sudo dnf upgrade -y; echo; read -p 'Press Enter to return...'"),
+					func(err error) tea.Msg { return updateDoneMsg{results: m.updateResults} },
+				)
 			}
 			return m, nil
 
@@ -403,6 +468,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case updateDoneMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			m.updateResults = msg.results
+		}
+		return m, nil
 
 	case removeDoneMsg:
 		m.loading = false
@@ -538,6 +612,13 @@ func fetchAndInstall(p api.Project) tea.Cmd {
 	}
 }
 
+func doGetUpdates() tea.Cmd {
+	return func() tea.Msg {
+		results, err := api.GetUpdates()
+		return updateDoneMsg{results: results, err: err}
+	}
+}
+
 func doRemoveSearch(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, err := api.GetInstalled(query)
@@ -574,7 +655,7 @@ func (m Model) View() string {
 		return m.viewMenu(w, h)
 	case modeCoprSearch, modeDNFSearch, modeRemoveSearch:
 		return m.viewSearch(w, h)
-	case modeCoprBrowse, modeDNFBrowse, modeRemoveBrowse:
+	case modeCoprBrowse, modeDNFBrowse, modeRemoveBrowse, modeUpdateBrowse:
 		return m.viewBrowse(w, h)
 	}
 	return ""
@@ -637,11 +718,14 @@ func (m Model) viewSearch(w, h int) string {
 func (m Model) viewBrowse(w, h int) string {
 	isCopr := m.mode == modeCoprBrowse
 	isRemove := m.mode == modeRemoveBrowse
+	isUpdate := m.mode == modeUpdateBrowse
 	name, title := "wtfd", "DNF Results"
 	if isCopr {
 		name, title = "wtfc", "COPR Results"
 	} else if isRemove {
 		name, title = "wtfd", "Remove"
+	} else if isUpdate {
+		name, title = "wtfd", "Updates"
 	}
 
 	panelW := w - 4
@@ -655,6 +739,8 @@ func (m Model) viewBrowse(w, h int) string {
 		hints = "↑↓ navigate  ·  space select  ·  i install  ·  y copy  ·  / search  ·  esc menu"
 	} else if isRemove {
 		hints = "↑↓ navigate  ·  space select  ·  i remove  ·  / search  ·  esc menu  ·  q quit"
+	} else if isUpdate {
+		hints = "↑↓ navigate  ·  space select  ·  i update selected  ·  I update all  ·  esc menu"
 	}
 	header.WriteString(styleHint.Render(hints))
 
@@ -670,12 +756,14 @@ func (m Model) viewBrowse(w, h int) string {
 		m.renderCoprResults(&body, panelW)
 	} else if isRemove {
 		m.renderRemoveResults(&body, panelW)
+	} else if isUpdate {
+		m.renderUpdateResults(&body, panelW)
 	} else {
 		m.renderDNFResults(&body, panelW)
 	}
 
 	// Footer
-	footer := m.renderFooter(isCopr, isRemove, panelW)
+	footer := m.renderFooter(isCopr, isRemove, isUpdate, panelW)
 
 	full := lipgloss.JoinVertical(lipgloss.Left,
 		headerPanel,
@@ -746,6 +834,33 @@ func (m Model) renderDNFResults(sb *strings.Builder, panelW int) {
 	}
 }
 
+func (m Model) renderUpdateResults(sb *strings.Builder, panelW int) {
+	if len(m.updateResults) == 0 && !m.loading {
+		sb.WriteString("\n  " + styleGreen.Render("everything is up to date") + "\n")
+		return
+	}
+	maxSummary := panelW - 50
+	if maxSummary < 20 {
+		maxSummary = 20
+	}
+	for i, p := range m.updateResults {
+		summary := p.Summary
+		if len(summary) > maxSummary {
+			summary = summary[:maxSummary-3] + "..."
+		}
+		check := "  "
+		if m.selected[p.Name] {
+			check = styleGreen.Render("✓ ")
+		}
+		line := fmt.Sprintf("%-28s  %-14s  %s", p.Name, styleDim.Render("→ "+p.NewVersion), summary)
+		if i == m.cursor {
+			sb.WriteString(styleSelected.Width(panelW).Render(" › "+check+line) + "\n")
+		} else {
+			sb.WriteString("   " + check + line + "\n")
+		}
+	}
+}
+
 func (m Model) renderRemoveResults(sb *strings.Builder, panelW int) {
 	if len(m.removeResults) == 0 && m.lastQuery != "" {
 		sb.WriteString("\n  " + styleDim.Render("no results") + "\n")
@@ -773,7 +888,7 @@ func (m Model) renderRemoveResults(sb *strings.Builder, panelW int) {
 	}
 }
 
-func (m Model) renderFooter(isCopr, isRemove bool, panelW int) string {
+func (m Model) renderFooter(isCopr, isRemove, isUpdate bool, panelW int) string {
 	if len(m.selected) > 0 {
 		var selNames []string
 		action := "install"
@@ -790,6 +905,12 @@ func (m Model) renderFooter(isCopr, isRemove bool, panelW int) string {
 			}
 		} else if isRemove {
 			for _, p := range m.removeResults {
+				if m.selected[p.Name] {
+					selNames = append(selNames, col.Render(p.Name))
+				}
+			}
+		} else if isUpdate {
+			for _, p := range m.updateResults {
 				if m.selected[p.Name] {
 					selNames = append(selNames, col.Render(p.Name))
 				}
@@ -819,7 +940,13 @@ func (m Model) renderFooter(isCopr, isRemove bool, panelW int) string {
 			styleRed.Render("sudo dnf remove " + m.removeResults[m.cursor].Name),
 		)
 	}
-	if !isCopr && !isRemove && len(m.dnfResults) > 0 {
+	if isUpdate && len(m.updateResults) > 0 {
+		return styleFooter.Width(panelW).Render(
+			styleGreen.Render("sudo dnf upgrade "+m.updateResults[m.cursor].Name) + "\n" +
+				styleHint.Render("I = upgrade everything"),
+		)
+	}
+	if !isCopr && !isRemove && !isUpdate && len(m.dnfResults) > 0 {
 		return styleFooter.Width(panelW).Render(
 			styleGreen.Render("sudo dnf install " + m.dnfResults[m.cursor].Name),
 		)
