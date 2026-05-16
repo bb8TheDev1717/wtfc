@@ -17,10 +17,17 @@ const (
 	modeMenu mode = iota
 	modeCoprSearch
 	modeCoprBrowse
+	modeDNFSearch
+	modeDNFBrowse
 )
 
 type searchDoneMsg struct {
 	results []api.Project
+	err     error
+}
+
+type dnfSearchDoneMsg struct {
+	results []api.DNFPackage
 	err     error
 }
 
@@ -36,17 +43,18 @@ type installMultiMsg struct {
 }
 
 type Model struct {
-	input      textinput.Model
-	results    []api.Project
-	selected   map[string]bool
-	cursor     int
-	menuCursor int
-	loading    bool
-	err        error
-	width      int
-	height     int
-	lastQuery  string
-	mode       mode
+	input       textinput.Model
+	results     []api.Project
+	dnfResults  []api.DNFPackage
+	selected    map[string]bool
+	cursor      int
+	menuCursor  int
+	loading     bool
+	err         error
+	width       int
+	height      int
+	lastQuery   string
+	mode        mode
 }
 
 var (
@@ -102,7 +110,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.input.Focus()
 					return m, textinput.Blink
 				case 1:
-					// DNF mode coming soon
+					m.mode = modeDNFSearch
+					m.input.Placeholder = "e.g. firefox, git, htop..."
+					m.input.Focus()
+					return m, textinput.Blink
 				}
 			}
 
@@ -133,6 +144,86 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, doCoprSearch(q)
 				}
 			}
+
+		case modeDNFSearch:
+			switch msg.String() {
+			case "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				if len(m.dnfResults) > 0 {
+					m.mode = modeDNFBrowse
+					m.input.Blur()
+					return m, nil
+				}
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				return m, nil
+			case "enter":
+				q := strings.TrimSpace(m.input.Value())
+				if q != "" {
+					m.loading = true
+					m.lastQuery = q
+					m.cursor = 0
+					m.dnfResults = nil
+					m.err = nil
+					m.mode = modeDNFBrowse
+					m.input.Blur()
+					return m, doDNFSearch(q)
+				}
+			}
+
+		case modeDNFBrowse:
+			switch msg.String() {
+			case "ctrl+c", "q":
+				return m, tea.Quit
+			case "esc":
+				m.mode = modeMenu
+				m.input.Blur()
+				m.input.SetValue("")
+				m.dnfResults = nil
+				m.lastQuery = ""
+				m.selected = make(map[string]bool)
+				return m, nil
+			case "/":
+				m.mode = modeDNFSearch
+				m.input.Focus()
+				return m, textinput.Blink
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down":
+				if m.cursor < len(m.dnfResults)-1 {
+					m.cursor++
+				}
+			case " ":
+				if len(m.dnfResults) > 0 {
+					key := m.dnfResults[m.cursor].Name
+					m.selected[key] = !m.selected[key]
+				}
+			case "i":
+				if len(m.dnfResults) > 0 {
+					var pkgs []string
+					if len(m.selected) > 0 {
+						for _, p := range m.dnfResults {
+							if m.selected[p.Name] {
+								pkgs = append(pkgs, p.Name)
+							}
+						}
+					} else {
+						pkgs = []string{m.dnfResults[m.cursor].Name}
+					}
+					return m, tea.ExecProcess(
+						exec.Command("bash", "-c",
+							fmt.Sprintf("sudo dnf install %s -y; echo; read -p 'Press Enter to return...'", strings.Join(pkgs, " ")),
+						), func(err error) tea.Msg {
+							return dnfSearchDoneMsg{results: m.dnfResults}
+						},
+					)
+				}
+			}
+			return m, nil
 
 		case modeCoprBrowse:
 			switch msg.String() {
@@ -179,6 +270,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
+	case dnfSearchDoneMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			m.dnfResults = msg.results
+		}
+		return m, nil
 
 	case searchDoneMsg:
 		m.loading = false
@@ -252,6 +352,13 @@ func fetchAndInstall(p api.Project) tea.Cmd {
 	}
 }
 
+func doDNFSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		results, err := api.SearchDNF(query)
+		return dnfSearchDoneMsg{results: results, err: err}
+	}
+}
+
 func doCoprSearch(query string) tea.Cmd {
 	return func() tea.Msg {
 		results, err := api.Search(query, 20)
@@ -274,9 +381,58 @@ func (m Model) View() string {
 			}
 		}
 
-	case modeCoprSearch:
+	case modeCoprSearch, modeDNFSearch:
 		sb.WriteString(styleDim.Render("Enter = search  esc = menu") + "\n\n")
 		sb.WriteString(m.input.View() + "\n")
+
+	case modeDNFBrowse:
+		sb.WriteString(styleDim.Render("↑↓ = navigate  space = select  i = install  / = search  esc = menu  q = quit") + "\n\n")
+		sb.WriteString(m.input.View() + "\n\n")
+
+		if m.loading {
+			sb.WriteString(styleDim.Render("searching... (this may take a moment)") + "\n")
+			return sb.String()
+		}
+		if m.err != nil {
+			sb.WriteString(styleRed.Render("error: "+m.err.Error()) + "\n")
+			return sb.String()
+		}
+		if len(m.dnfResults) == 0 && m.lastQuery != "" {
+			sb.WriteString(styleDim.Render("no results") + "\n")
+			return sb.String()
+		}
+
+		for i, p := range m.dnfResults {
+			check := "  "
+			if m.selected[p.Name] {
+				check = styleGreen.Render("✓ ")
+			}
+			line := fmt.Sprintf("%-30s  %s", p.Name, p.Summary)
+			if i == m.cursor {
+				sb.WriteString(styleSelected.Render(" > "+check+line) + "\n")
+			} else {
+				sb.WriteString("   " + check + line + "\n")
+			}
+		}
+
+		if len(m.selected) > 0 {
+			sb.WriteString("\n")
+			var selNames []string
+			for _, p := range m.dnfResults {
+				if m.selected[p.Name] {
+					selNames = append(selNames, styleGreen.Render(p.Name))
+				}
+			}
+			sb.WriteString(styleBorder.Render(
+				styleDim.Render("selected: ")+strings.Join(selNames, ", ")+"\n"+
+					styleDim.Render("press i to install all"),
+			) + "\n")
+		} else if len(m.dnfResults) > 0 {
+			sb.WriteString("\n")
+			sb.WriteString(styleBorder.Render(
+				styleGreen.Render("sudo dnf install "+m.dnfResults[m.cursor].Name),
+			) + "\n")
+		}
 
 	case modeCoprBrowse:
 		sb.WriteString(styleDim.Render("↑↓ = navigate  space = select  i = install  y = copy  / = search  esc = menu  q = quit") + "\n\n")
